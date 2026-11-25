@@ -1,49 +1,86 @@
 import asyncio
 import random
+import sqlite3  # 1. Подключаем встроенную базу данных SQLite
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
-TOKEN = "YOUR_BOT_TOKEN_HERE"
+TOKEN = "YOUR_TOKEN_HERE"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-secret_number = 0
-attempts = 0  # НОВОЕ: Счётчик попыток игрока
+# 2. Создаём базу данных и таблицу рекордов при запуске программы
+conn = sqlite3.connect("game.db")
+cursor = conn.cursor()
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS records (
+        user_id INTEGER PRIMARY KEY,
+        best_score INTEGER
+    )
+""")
+conn.commit()
+
+# Словарь для хранения активных игр каждого игрока (чтобы друзья не мешали друг другу)
+games = {}
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    global secret_number, attempts  # НОВОЕ: Разрешаем менять обе переменные
-    secret_number = random.randint(1, 100)
-    attempts = 0  # НОВОЕ: Сбрасываем попытки в ноль при новой игре
+    user_id = message.from_user.id
+    # Создаём личную игру для конкретного пользователя
+    games[user_id] = {
+        "secret": random.randint(1, 100),
+        "attempts": 0
+    }
+    
+    # Проверяем в базе данных, есть ли у игрока старый рекорд
+    cursor.execute("SELECT best_score FROM records WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    
+    record_text = f"Твой лучший рекорд: {row[0]} попыток. 🏆" if row else "У тебя пока нет рекордов. Сыграем!"
     
     await message.answer(
-        "🎲 Новая игра началась!\n"
-        "Я загадал случайное число от 1 до 100.\n"
-        "Попробуй угадать его за минимальное число попыток! Пиши число:"
+        f"🎲 Новая игра началась!\n{record_text}\n\n"
+        "Я загадал число от 1 до 100. Попробуй угадать:"
     )
 
 @dp.message()
 async def game_handler(message: types.Message):
-    global attempts, secret_number  # Теперь можно менять обе переменные!
-
+    user_id = message.from_user.id
     
-    if secret_number == 0:
-        await message.answer("Сначала нажми /start, чтобы я загадал число! 🎲")
+    if user_id not in games:
+        await message.answer("Сначала нажми /start, чтобы начать новую игру! 🎲")
         return
 
     if message.text.isdigit():
         guess = int(message.text)
-        attempts += 1  # НОВОЕ: Прибавляем +1 к попыткам за каждый ход!
+        games[user_id]["attempts"] += 1
         
-        if guess == secret_number:
+        secret = games[user_id]["secret"]
+        attempts = games[user_id]["attempts"]
+        
+        if guess == secret:
+            # Достаём прошлый рекорд из базы
+            cursor.execute("SELECT best_score FROM records WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            
+            # Если рекорда не было ИЛИ текущие попытки меньше старого рекорда — обновляем базу!
+            if row is None or attempts < row[0]:
+                cursor.execute("INSERT OR REPLACE INTO records (user_id, best_score) VALUES (?, ?)", (user_id, attempts))
+                conn.commit()
+                record_msg = "🔥 НОВЫЙ ЛИЧНЫЙ РЕКОРД! Я записал его в базу данных!"
+            else:
+                record_msg = f"Твой прошлый рекорд ({row[0]} попыток) пока не побит."
+
             await message.answer(
-                f"🎉 ПОБЕДА! Ты угадал число {secret_number}!\n"
-                f"🏆 Потрачено попыток: {attempts}\n\n"
-                "Нажми /start, чтобы сыграть ещё раз."
+                f"🎉 ПОБЕДА! Загаданное число: {secret}\n"
+                f"Попыток затрачено: {attempts}\n"
+                f"{record_msg}\n\n"
+                "Нажми /start для новой игры."
             )
-            secret_number = 0  # НОВОЕ: Обнуляем игру, чтобы после победы нельзя было спамить числами
-        elif guess > secret_number:
+            # Удаляем завершённую игру из памяти
+            del games[user_id]
+            
+        elif guess > secret:
             await message.answer(f"📉 Моё число МЕНЬШЕ. (Попытка №{attempts})")
         else:
             await message.answer(f"📈 Моё число БОЛЬШЕ. (Попытка №{attempts})")
@@ -51,7 +88,7 @@ async def game_handler(message: types.Message):
         await message.answer("Пиши только числа от 1 до 100! 🔢")
 
 async def main():
-    print("Финальная версия игры запущена...")
+    print("Бот с базой данных SQLite запущен...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
